@@ -1,3 +1,6 @@
+#![allow(unknown_lints)]
+#![warn(clippy::all)]
+
 extern crate clap;
 extern crate gimli;
 extern crate object;
@@ -142,8 +145,8 @@ impl Display for Graph {
                 writeln!(f, "    n{} [label=\"{}\"]", idx, v)?;
             }
         }
-        for ((n1, n2), _) in &self.edges {
-            writeln!(f, "    n{} -> n{}", n1, n2)?;
+        for ((n1, n2), p) in &self.edges {
+            writeln!(f, "    n{} -> n{} [{}]", n1, n2, p)?;
         }
 
         for c in &self.clusters {
@@ -210,7 +213,7 @@ fn main() {
         let mut graph = Graph::new("");
 
         for f in files {
-            if let Some(_) = matches.value_of("verbose") {
+            if matches.value_of("verbose").is_some() {
                 println!("Parsing file {}", f);
             }
 
@@ -223,7 +226,7 @@ fn main() {
     };
 
     // write as dot format
-    if let Some(_) = matches.value_of("verbose") {
+    if matches.value_of("verbose").is_some() {
         println!("Exporting graph");
     }
     write!(writer, "{}", graph).expect("Unable to write the graph");
