@@ -43,20 +43,20 @@ impl Graph {
         let file = fs::File::open(filename);
         let file = match file {
             Ok(file) => file,
-            Err(error) => panic!("Unable to open the file: {:?}", error)
+            Err(error) => panic!("Unable to open {} : {:?}", filename, error)
         };
 
         let memory = unsafe { memmap::Mmap::map(&file) };
         let memory = match memory {
             Ok(memory) => memory,
-            Err(error) => panic!("Unable to mmap the file: {:?}", error)
+            Err(error) => panic!("Unable to mmap {} : {:?}", filename, error)
         };
 
-        // parse the mapped file, borrowed by self.memory
+        // parse the mapped file, borrowed by memory
         let object_file = object::File::parse(&*memory);
         let object_file = match object_file {
             Ok(object_file) => object_file,
-            Err(error) => panic!("Unable to parse the file: {:?}", error)
+            Err(error) => panic!("Unable to parse {} : {:?}", filename, error)
         };
 
         // add the dynamic symbols to the graph
@@ -108,8 +108,8 @@ impl Graph {
         if v.starts_with(".LC") {
             return None;
         }
-        // __ prefixed symbols are compiler reserved
-        if v.starts_with("__") {
+        // _ prefixed symbols are compiler reserved
+        if v.starts_with('_') {
             return None;
         }
 
@@ -179,23 +179,23 @@ fn main() {
         .version("0.1")
         .about("Parse shared objects and compute their internal and external dependencies.")
         .arg(
-            Arg::with_name("output")
-                .short("o")
-                .help("Sets the output file")
-                .required(false),
-        )
-        .arg(
             Arg::with_name("verbose")
                 .short("v")
                 .help("Sets the level of verbosity")
                 .required(false),
         )
         .arg(
+            Arg::with_name("output")
+                .short("o")
+                .help("Sets the output file")
+                .takes_value(true)
+                .required(false),
+        )
+        .arg(
             Arg::with_name("file")
                 .help("Sets the input file to use")
                 .multiple(true)
-                .required(true)
-                .index(1),
+                .required(true),
         )
         .get_matches();
 
@@ -213,7 +213,7 @@ fn main() {
         let mut graph = Graph::new("");
 
         for f in files {
-            if matches.value_of("verbose").is_some() {
+            if matches.is_present("verbose") {
                 println!("Parsing file {}", f);
             }
 
@@ -226,7 +226,7 @@ fn main() {
     };
 
     // write as dot format
-    if matches.value_of("verbose").is_some() {
+    if matches.is_present("verbose") {
         println!("Exporting graph");
     }
     write!(writer, "{}", graph).expect("Unable to write the graph");
