@@ -23,8 +23,13 @@ struct Graph {
     nodes: HashMap<usize, NodeProperties>,
     edges: HashMap<(usize, usize), EdgeProperties>,
 
-    clusters: Vec<Graph>,
-    strings: string_interner::StringInterner<usize>
+    clusters: Vec<SubGraph>,
+    strings: string_interner::StringInterner<usize>,
+    
+    // temporary map undefined symbol ->  lib
+    undefined: HashMap<usize, Vec<usize>>,
+    // temporary map defined symbol -> lib 
+    defined: HashMap<usize, Vec<usize>>,
 }
 
 impl Graph {
@@ -33,8 +38,12 @@ impl Graph {
             name: String::from(name),
             nodes: HashMap::new(),
             edges: HashMap::new(),
+
             clusters: Vec::new(),
             strings: string_interner::StringInterner::new(),
+            
+            undefined: HashMap::new(),
+            defined: HashMap::new(),
         }
     }
 
@@ -59,41 +68,83 @@ impl Graph {
             Err(error) => panic!("Unable to parse {} : {:?}", filename, error)
         };
 
+        let filename = match self.mangle_as_valid_dot_name(filename) {
+            Some(v) => v,
+            None => return,
+        };
+
+        let filename = self.strings.get_or_intern(filename);
+        let mut properties = NodeProperties { symbols: vec![] };
+        
         // add the dynamic symbols to the graph
         for (_, sym) in object_file.dynamic_symbols() {
-            self.insert(filename, sym);
+            self.insert(&mut properties, filename, sym);
         }
 
         // add the non-dynamic symbols to the graph (in case of plain object files)
         for (_, sym) in object_file.symbols() {
-            self.insert(filename, sym);
+            self.insert(&mut properties, filename, sym);
         }
+
+        self.nodes.insert(filename, properties);
     }
 
-    fn insert(&mut self, filename: &str, sym: object::Symbol) {
-            if sym.name().unwrap_or("").is_empty() {
-                return
-            }
+    fn insert(&mut self, properties: &mut NodeProperties, filename: usize, sym: object::Symbol) {
+        if sym.name().unwrap_or("").is_empty() {
+            return
+        }
 
-            let symbol_name = sym.name().unwrap();
+        let symbol_name = sym.name().unwrap();
 
-            let filename = match self.mangle_as_valid_dot_name(filename) {
-                Some(v) => v,
-                None => return,
-            };
-            let symbol_name = match self.mangle_as_valid_dot_name(symbol_name) {
-                Some(v) => v,
-                None => return,
-            };
+        let symbol_name = match self.mangle_as_valid_dot_name(symbol_name) {
+            Some(v) => v,
+            None => return,
+        };
 
-            let filename = self.strings.get_or_intern(filename);
-            let symbol_name = self.strings.get_or_intern(symbol_name);
+        let symbol_name = self.strings.get_or_intern(symbol_name);
 
-            if sym.is_undefined() {
-                self.edges.insert((filename, symbol_name), EdgeProperties {});
+        if sym.is_undefined() {
+            if let Some(libs) = self.defined.get(&symbol_name) {
+                // resolve to previously decoded libs 
+                for lib in libs.iter() {
+                    let edge = (filename, *lib);
+                    if let Some(properties) = self.edges.get_mut(&edge) {
+                        properties.symbols.push(symbol_name);
+                    } else {
+                        self.edges.insert(edge, EdgeProperties { symbols: vec![symbol_name]});
+                    }
+                }
             } else {
-                self.edges.insert((symbol_name, filename), EdgeProperties {});
+                // will be resolved later, store it
+                if let Some(libs) = self.undefined.get_mut(&symbol_name) {
+                    libs.push(filename);
+                } else {
+                    self.undefined.insert(symbol_name, vec![filename]);
+                }
             }
+        } else {
+            // render in the label
+            properties.symbols.push(symbol_name);
+
+            // store for later resolution
+            if let Some(libs) = self.defined.get_mut(&filename) {
+                libs.push(filename);
+            } else {
+                self.defined.insert(symbol_name, vec![filename]);
+            }
+
+            // cleanup undefined if needed
+            if let Some((_, libs)) = self.undefined.remove_entry(&symbol_name) {
+                for lib in libs.iter() {
+                    let edge = (*lib, filename);
+                    if let Some(properties) = self.edges.get_mut(&edge) {
+                        properties.symbols.push(symbol_name);
+                    } else {
+                        self.edges.insert(edge, EdgeProperties { symbols: vec![symbol_name]});
+                    }
+                }
+            }
+        }
     }
 
     fn mangle_as_valid_dot_name(&self, v: &str) -> Option<String> {
@@ -132,45 +183,85 @@ impl Graph {
             .map(|c: char| if c == '.' { '_' } else { c })
             .collect::<String>())
     }
+
+    // remove all labels information from edges
+    fn merge(&mut self) {
+        for e in self.edges.values_mut() {
+            e.symbols.clear();
+        }
+    }
 }
 
 impl Display for Graph {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         writeln!(f, "digraph {} {{", self.name)?;
 
-        for (idx, v) in self.strings.iter() {
-            if let Some(node_properties) = self.nodes.get(&idx) {
-                writeln!(f, "    n{} [label=\"{}\";{}]", idx, v, node_properties)?;
+        for c in &self.clusters {
+            if let Some(label) = self.strings.resolve(c.name) {
+                writeln!(f, "    subgraph {} {{", label)?;
             } else {
-                writeln!(f, "    n{} [label=\"{}\"]", idx, v)?;
+                writeln!(f, "    subgraph {{")?;
             }
-        }
-        for ((n1, n2), p) in &self.edges {
-            writeln!(f, "    n{} -> n{} [{}]", n1, n2, p)?;
+
+            for (idx, _) in c.nodes.iter() {
+                if let Some(label) = self.strings.resolve(*idx) {
+                    writeln!(f, "        n{} [label=\"{}\"]", idx, label)?;
+                } else {
+                    writeln!(f, "        n{}", idx)?;
+                }
+            }
+
+            writeln!(f, "    }}")?;
         }
 
-        for c in &self.clusters {
-            writeln!(f, "    {}", c)?;
+        for (idx, _) in self.nodes.iter() {
+            if let Some(label) = self.strings.resolve(*idx) {
+                writeln!(f, "    n{} [label=\"{}\"]", idx, label)?;
+            }
         }
+
+        for ((n1, n2), p) in &self.edges {
+            if p.symbols.len() == 0 {
+                writeln!(f, "    n{} -> n{}", n1, n2)?;
+            } else {
+                for symbol in p.symbols.iter() {
+                    if let Some(label) = self.strings.resolve(*symbol) {
+                        writeln!(f, "    n{} -> n{} [label=\"{}\"]", n1, n2, label)?;
+                    }
+                }
+            }
+        }
+
         writeln!(f, "}}")
     }
 }
 
 #[derive(Debug)]
-struct NodeProperties {}
-
-impl Display for NodeProperties {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "")
-    }
+struct NodeProperties {
+    symbols: Vec<usize>,
 }
 
 #[derive(Debug)]
-struct EdgeProperties {}
+struct EdgeProperties {
+    symbols: Vec<usize>,
+}
 
-impl Display for EdgeProperties {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "")
+#[derive(Debug)]
+struct SubGraph {
+    name: usize,
+    nodes: HashMap<usize, NodeProperties>
+}
+
+impl SubGraph {
+    fn new(name: usize) -> Self {
+        Self {
+            name: name,
+            nodes: HashMap::new()
+        }
+    }
+    
+    fn insert(&mut self, symbol_name: usize) {
+        self.nodes.insert(symbol_name, NodeProperties { symbols: vec![] });
     }
 }
 
@@ -182,6 +273,12 @@ fn main() {
             Arg::with_name("verbose")
                 .short("v")
                 .help("Sets the level of verbosity")
+                .required(false),
+        )
+        .arg(
+            Arg::with_name("merge")
+                .short("m")
+                .help("Generate only one edge between libraries")
                 .required(false),
         )
         .arg(
@@ -218,6 +315,13 @@ fn main() {
             }
 
             graph.parse_binary(f);
+        }
+
+        if matches.is_present("merge") {
+            if matches.is_present("verbose") {
+                println!("merging");
+            }
+            graph.merge();
         }
 
         graph
