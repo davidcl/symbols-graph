@@ -63,10 +63,11 @@ impl Graph {
 
         // parse the mapped file, borrowed by memory
         let object_file = object::File::parse(&*memory);
-        let object_file = match object_file {
-            Ok(object_file) => object_file,
-            Err(error) => panic!("Unable to parse {} : {:?}", filename, error)
-        };
+        if let Err(error) = object_file {
+            eprintln!("Unable to parse {} : {:?}", filename, error);
+            return
+        }
+        let object_file = object_file.unwrap();
 
         let filename = match self.mangle_as_valid_dot_name(filename) {
             Some(v) => v,
