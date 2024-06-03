@@ -7,7 +7,7 @@ extern crate object;
 extern crate memmap;
 extern crate string_interner;
 
-use clap::{App, Arg};
+use clap::{Command, Arg, ArgAction};
 use std::collections::HashMap;
 use std::fmt;
 use std::fmt::Display;
@@ -15,7 +15,7 @@ use std::fs;
 use std::io;
 use std::io::Write;
 use std::path::Path;
-use object::Object;
+use object::{Object, ObjectSymbol};
 
 struct Graph {
     name: String,
@@ -78,12 +78,12 @@ impl Graph {
         let mut properties = NodeProperties { symbols: vec![] };
         
         // add the dynamic symbols to the graph
-        for (_, sym) in object_file.dynamic_symbols() {
+        for sym in object_file.dynamic_symbols() {
             self.insert(&mut properties, filename, sym);
         }
 
         // add the non-dynamic symbols to the graph (in case of plain object files)
-        for (_, sym) in object_file.symbols() {
+        for sym in object_file.symbols() {
             self.insert(&mut properties, filename, sym);
         }
 
@@ -267,38 +267,41 @@ impl SubGraph {
 }
 
 fn main() {
-    let matches = App::new("Symbols graph")
+    let matches = Command::new("Symbols graph")
         .version("0.1")
         .about("Parse shared objects and compute their internal and external dependencies.")
         .arg(
-            Arg::with_name("verbose")
-                .short("v")
+            Arg::new("verbose")
+                .short('v')
+                .long("verbose")
                 .help("Sets the level of verbosity")
                 .required(false),
         )
         .arg(
-            Arg::with_name("merge")
-                .short("m")
+            Arg::new("merge")
+                .short('m')
+                .long("merge")
                 .help("Generate only one edge between libraries")
                 .required(false),
         )
         .arg(
-            Arg::with_name("output")
-                .short("o")
+            Arg::new("output")
+                .short('o')
+                .long("output")
                 .help("Sets the output file")
-                .takes_value(true)
+                .action(ArgAction::Set)
                 .required(false),
         )
         .arg(
-            Arg::with_name("file")
+            Arg::new("file")
                 .help("Sets the input file to use")
-                .multiple(true)
+                .action(ArgAction::Append)
                 .required(true),
         )
         .get_matches();
 
     // the file to write into
-    let mut writer: Box<dyn Write> = match matches.value_of("output") {
+    let mut writer: Box<dyn Write> = match matches.get_one::<String>("output") {
         Some(output) => {
             let path = Path::new(output);
             Box::new(fs::File::create(&path).unwrap())
@@ -307,19 +310,19 @@ fn main() {
     };
 
     // read inputs and write dot file directly
-    let graph = if let Some(files) = matches.values_of("file") {
+    let graph = if let Some(files) = matches.get_many::<String>("file") {
         let mut graph = Graph::new("");
 
         for f in files {
-            if matches.is_present("verbose") {
+            if matches.contains_id("verbose") {
                 println!("Parsing file {}", f);
             }
 
             graph.parse_binary(f);
         }
 
-        if matches.is_present("merge") {
-            if matches.is_present("verbose") {
+        if matches.contains_id("merge") {
+            if matches.contains_id("verbose") {
                 println!("merging");
             }
             graph.merge();
@@ -331,7 +334,7 @@ fn main() {
     };
 
     // write as dot format
-    if matches.is_present("verbose") {
+    if matches.contains_id("verbose") {
         println!("Exporting graph");
     }
     write!(writer, "{}", graph).expect("Unable to write the graph");

@@ -4,8 +4,8 @@ version = "0.1.0"
 authors = ["Clément DAVID <c.david86@gmail.com>"]
 
 [dependencies]
-object = "0"
-gimli = "0"
-clap = "2"
-memmap = "0"
-string-interner = "0"
+object = "0.36"
+gimli = "0.30"
+clap = "4.5"
+memmap = "0.7"
+string-interner = "0.7"
