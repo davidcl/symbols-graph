@@ -2,7 +2,6 @@
 #![warn(clippy::all)]
 
 extern crate clap;
-extern crate gimli;
 extern crate object;
 extern crate memmap;
 extern crate string_interner;
@@ -15,6 +14,7 @@ use std::fs;
 use std::io;
 use std::io::Write;
 use std::path::Path;
+use std::str;
 use object::{Object, ObjectSymbol};
 
 struct Graph {
@@ -77,25 +77,25 @@ impl Graph {
         let filename = self.strings.get_or_intern(filename);
         let mut properties = NodeProperties { symbols: vec![] };
         
-        // add the dynamic symbols to the graph
-        for sym in object_file.dynamic_symbols() {
-            self.insert(&mut properties, filename, sym);
+        // add the exported symbols to the graph
+        if let Ok(symbols) = object_file.exports() {
+            for sym in symbols {
+                self.insert_exported(&mut properties, filename, sym.name());
+            }
         }
 
-        // add the non-dynamic symbols to the graph (in case of plain object files)
-        for sym in object_file.symbols() {
-            self.insert(&mut properties, filename, sym);
+        // add the imported symbols to the graph (in case of plain object files)
+        if let Ok(symbols) = object_file.imports() {
+            for sym in symbols {
+                self.insert_imported(&mut properties, filename, sym.name());
+            }
         }
 
         self.nodes.insert(filename, properties);
     }
 
-    fn insert(&mut self, properties: &mut NodeProperties, filename: usize, sym: object::Symbol) {
-        if sym.name().unwrap_or("").is_empty() {
-            return
-        }
-
-        let symbol_name = sym.name().unwrap();
+    fn insert_exported(&mut self, properties: &mut NodeProperties, filename: usize, exported_symbol: &[u8]) {
+        let symbol_name = str::from_utf8(exported_symbol).unwrap();
 
         let symbol_name = match self.mangle_as_valid_dot_name(symbol_name) {
             Some(v) => v,
@@ -104,46 +104,56 @@ impl Graph {
 
         let symbol_name = self.strings.get_or_intern(symbol_name);
 
-        if sym.is_undefined() {
-            if let Some(libs) = self.defined.get(&symbol_name) {
-                // resolve to previously decoded libs 
-                for lib in libs.iter() {
-                    let edge = (filename, *lib);
-                    if let Some(properties) = self.edges.get_mut(&edge) {
-                        properties.symbols.push(symbol_name);
-                    } else {
-                        self.edges.insert(edge, EdgeProperties { symbols: vec![symbol_name]});
-                    }
-                }
-            } else {
-                // will be resolved later, store it
-                if let Some(libs) = self.undefined.get_mut(&symbol_name) {
-                    libs.push(filename);
+        // render in the label
+        properties.symbols.push(symbol_name);
+
+        // store for later resolution
+        if let Some(libs) = self.defined.get_mut(&filename) {
+            libs.push(filename);
+        } else {
+            self.defined.insert(symbol_name, vec![filename]);
+        }
+
+        // cleanup undefined if needed
+        if let Some((_, libs)) = self.undefined.remove_entry(&symbol_name) {
+            for lib in libs.iter() {
+                let edge = (*lib, filename);
+                if let Some(properties) = self.edges.get_mut(&edge) {
+                    properties.symbols.push(symbol_name);
                 } else {
-                    self.undefined.insert(symbol_name, vec![filename]);
+                    self.edges.insert(edge, EdgeProperties { symbols: vec![symbol_name]});
+                }
+            }
+        }
+    }
+
+    fn insert_imported(&mut self, properties: &mut NodeProperties, filename: usize, imported_symbol: &[u8]) {
+        let symbol_name = str::from_utf8(imported_symbol).unwrap();
+
+        let symbol_name = match self.mangle_as_valid_dot_name(symbol_name) {
+            Some(v) => v,
+            None => return,
+        };
+
+        let symbol_name = self.strings.get_or_intern(symbol_name);
+
+        // lookup on existing libs
+        if let Some(libs) = self.defined.get(&symbol_name) {
+            // resolve to previously decoded libs 
+            for lib in libs.iter() {
+                let edge = (filename, *lib);
+                if let Some(properties) = self.edges.get_mut(&edge) {
+                    properties.symbols.push(symbol_name);
+                } else {
+                    self.edges.insert(edge, EdgeProperties { symbols: vec![symbol_name]});
                 }
             }
         } else {
-            // render in the label
-            properties.symbols.push(symbol_name);
-
-            // store for later resolution
-            if let Some(libs) = self.defined.get_mut(&filename) {
+            // will be resolved later, store it
+            if let Some(libs) = self.undefined.get_mut(&symbol_name) {
                 libs.push(filename);
             } else {
-                self.defined.insert(symbol_name, vec![filename]);
-            }
-
-            // cleanup undefined if needed
-            if let Some((_, libs)) = self.undefined.remove_entry(&symbol_name) {
-                for lib in libs.iter() {
-                    let edge = (*lib, filename);
-                    if let Some(properties) = self.edges.get_mut(&edge) {
-                        properties.symbols.push(symbol_name);
-                    } else {
-                        self.edges.insert(edge, EdgeProperties { symbols: vec![symbol_name]});
-                    }
-                }
+                self.undefined.insert(symbol_name, vec![filename]);
             }
         }
     }
@@ -272,8 +282,8 @@ fn main() {
         .about("Parse shared objects and compute their internal and external dependencies.")
         .arg(
             Arg::new("verbose")
-                .short('v')
                 .long("verbose")
+                .action(clap::ArgAction::SetTrue)
                 .help("Sets the level of verbosity")
                 .required(false),
         )
@@ -281,6 +291,7 @@ fn main() {
             Arg::new("merge")
                 .short('m')
                 .long("merge")
+                .action(clap::ArgAction::SetTrue)
                 .help("Generate only one edge between libraries")
                 .required(false),
         )
@@ -288,6 +299,7 @@ fn main() {
             Arg::new("output")
                 .short('o')
                 .long("output")
+                .num_args(1)
                 .help("Sets the output file")
                 .action(ArgAction::Set)
                 .required(false),
@@ -314,15 +326,15 @@ fn main() {
         let mut graph = Graph::new("");
 
         for f in files {
-            if matches.contains_id("verbose") {
+            if matches.get_flag("verbose") {
                 println!("Parsing file {}", f);
             }
 
             graph.parse_binary(f);
         }
 
-        if matches.contains_id("merge") {
-            if matches.contains_id("verbose") {
+        if matches.get_flag("merge") {
+            if matches.get_flag("verbose") {
                 println!("merging");
             }
             graph.merge();
@@ -334,7 +346,7 @@ fn main() {
     };
 
     // write as dot format
-    if matches.contains_id("verbose") {
+    if matches.get_flag("verbose") {
         println!("Exporting graph");
     }
     write!(writer, "{}", graph).expect("Unable to write the graph");
