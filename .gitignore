@@ -1,3 +1,7 @@
 /target
 **/*.rs.bk
 *.dot
+/build/
+*.png
+*.dot
+/.vscode/
